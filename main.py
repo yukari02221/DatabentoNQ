@@ -4,10 +4,14 @@ import asyncio
 import pandas as pd
 from databento_dbn import SymbolMappingMsg, OHLCVMsg, SystemMsg
 import os
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime, timedelta
 import pytz
 import time
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from collections import defaultdict
+import numpy as np
 
 class CMELiveDataFetcher:
     def __init__(self, api_key: Optional[str] = None):
@@ -23,9 +27,42 @@ class CMELiveDataFetcher:
 
         # instrument_id → symbol名 (stype_out_symbol) を保持する辞書
         self.instrument_id_map = {}
+
+        # 価格データを保存するための辞書
+        self.price_data: Dict[str, Dict] = defaultdict(lambda: {
+            'times': [],
+            'prices': [],
+            'base_price': None,
+            'returns': [],
+            'fig': None,
+            'ax': None
+        })
+        
+        # プロット更新間隔（秒）
+        self.plot_update_interval = 5.0
+        self.last_plot_update = time.time()
+
         
         # NY市場の時間設定
         self.ny_tz = pytz.timezone('America/New_York')
+        self.logger.log('INFO', 'init', f"Timezone set to: {self.ny_tz}")
+
+    def reset_price_data(self):
+        """価格データのリセット"""
+        for symbol in self.price_data:
+            self.price_data[symbol].update({
+                'times': [],
+                'prices': [],
+                'base_price': None,
+                'returns': [],
+                'market_open_time': None
+            })
+            # プロット関連のオブジェクトは保持
+            plt.close(self.price_data[symbol]['fig'])
+            self.price_data[symbol]['fig'] = None
+            self.price_data[symbol]['ax'] = None
+        
+        self.logger.log('INFO', 'reset_price_data', "Price data has been reset for new session")
         
     def get_next_market_open(self) -> datetime:
         """次の取引開始時間（NY時間9:30の30分前）を取得"""
@@ -54,6 +91,35 @@ class CMELiveDataFetcher:
             datetime: NY時間16:00に設定された取引終了時間
         """
         return target_date.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    def setup_plot(self, symbol: str):
+        """プロットの初期設定"""
+        if self.price_data[symbol]['fig'] is None:
+            self.price_data[symbol]['fig'], self.price_data[symbol]['ax'] = plt.subplots(figsize=(12, 6))
+            self.price_data[symbol]['ax'].set_title(f'{symbol} Intraday Returns')
+            self.price_data[symbol]['ax'].set_xlabel('Time (UTC)')
+            self.price_data[symbol]['ax'].set_ylabel('Return from Open (%)')
+            self.price_data[symbol]['ax'].grid(True)
+            plt.ion()  # インタラクティブモードを有効化
+            
+    def update_plot(self, symbol: str):
+        """プロットの更新"""
+        current_time = time.time()
+        if current_time - self.last_plot_update < self.plot_update_interval:
+            return
+
+        if len(self.price_data[symbol]['returns']) > 0:
+            ax = self.price_data[symbol]['ax']
+            ax.clear()
+            ax.plot(self.price_data[symbol]['times'], self.price_data[symbol]['returns'], 'b-')
+            ax.set_title(f'{symbol} Intraday Returns ({datetime.now().strftime("%Y%m%d")})')
+            ax.set_xlabel('Time (UTC)')
+            ax.set_ylabel('Return from Open (%)')
+            ax.grid(True)
+            plt.draw()
+            plt.pause(0.01)
+            
+        self.last_plot_update = current_time
 
     def setup_subscription(self, symbols: str = "NQ.c.1"):
         try:
@@ -113,7 +179,39 @@ class CMELiveDataFetcher:
                     'volume': record.volume
                 }
 
-                self.logger.log('INFO', 'process_bar', f"OHLCV Data: {bar_data}")
+                # NY時間9:30のタイムスタンプを設定（初回のみ）
+                if self.price_data[mapped_symbol]['market_open_time'] is None:
+                    market_open_time = pd.Timestamp(datetime.now(self.ny_tz).replace(
+                        hour=9, minute=30, second=0, microsecond=0
+                    ))
+                    self.price_data[mapped_symbol]['market_open_time'] = market_open_time
+                
+                current_time = pd.Timestamp(record.ts_event)
+                
+                # データを保存
+                self.price_data[mapped_symbol]['times'].append(current_time)
+                self.price_data[mapped_symbol]['prices'].append(bar_data['close'])
+                
+                # NY時間9:30以降の最初のデータを基準価格として設定
+                if (self.price_data[mapped_symbol]['base_price'] is None and 
+                    current_time >= self.price_data[mapped_symbol]['market_open_time']):
+                    self.price_data[mapped_symbol]['base_price'] = bar_data['close']
+                    self.setup_plot(mapped_symbol)
+                
+                # リターンを計算（%）- 基準価格が設定されている場合のみ
+                if self.price_data[mapped_symbol]['base_price'] is not None:
+                    current_return = ((bar_data['close'] / self.price_data[mapped_symbol]['base_price']) - 1) * 100
+                    self.price_data[mapped_symbol]['returns'].append(current_return)
+                    
+                    # プロットを更新
+                    self.update_plot(mapped_symbol)
+                    
+                    self.logger.log('INFO', 'process_bar', 
+                                  f"OHLCV Data: {bar_data}, Return: {current_return:.2f}%")
+                else:
+                    self.price_data[mapped_symbol]['returns'].append(0.0)  # 寄り付き前はリターン0%
+                    self.logger.log('INFO', 'process_bar', 
+                                  f"OHLCV Data: {bar_data}, Waiting for market open...")
 
             else:
                 self.logger.log(
@@ -134,6 +232,8 @@ class CMELiveDataFetcher:
     async def run_session(self, market_close: datetime):
         """1取引セッションの実行"""
         try:
+            # セッション開始時にデータをリセット
+            self.reset_price_data()
             self.setup_subscription()
             self.client.add_callback(record_callback=self.process_bar)
             self.client.start()
@@ -157,6 +257,8 @@ class CMELiveDataFetcher:
             if self.client:
                 self.client.stop()
                 self.logger.log('INFO', 'run_session', "Streaming stopped")
+            # セッション終了時にもデータをリセット
+            self.reset_price_data()
 
     async def run_async(self):
         """メインループ処理"""
