@@ -35,7 +35,8 @@ class CMELiveDataFetcher:
             'base_price': None,
             'returns': [],
             'fig': None,
-            'ax': None
+            'ax': None,
+            'market_open_time': None
         })
         
         # プロット更新間隔（秒）
@@ -117,7 +118,7 @@ class CMELiveDataFetcher:
             ax.set_ylabel('Return from Open (%)')
             ax.grid(True)
             plt.draw()
-            plt.pause(0.01)
+            plt.pause(1)
             
         self.last_plot_update = current_time
 
@@ -178,6 +179,11 @@ class CMELiveDataFetcher:
                     'close':  record.close / 1e9,
                     'volume': record.volume
                 }
+                current_time = (
+                    pd.Timestamp(record.ts_event)
+                    .tz_localize("UTC")    # tz-naive → UTC にする
+                    .tz_convert(self.ny_tz)  # UTC → America/New_York に変換
+                )
 
                 # NY時間9:30のタイムスタンプを設定（初回のみ）
                 if self.price_data[mapped_symbol]['market_open_time'] is None:
@@ -185,8 +191,6 @@ class CMELiveDataFetcher:
                         hour=9, minute=30, second=0, microsecond=0
                     ))
                     self.price_data[mapped_symbol]['market_open_time'] = market_open_time
-                
-                current_time = pd.Timestamp(record.ts_event)
                 
                 # データを保存
                 self.price_data[mapped_symbol]['times'].append(current_time)
