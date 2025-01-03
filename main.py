@@ -30,7 +30,6 @@ class CMELiveDataFetcher:
         self.instrument_id_map = {}
         
         # price_data[symbol] の中に times / returns などを格納
-        # Matplotlibを使わないので fig/ax は削除
         self.price_data: Dict[str, Dict] = defaultdict(lambda: {
             'times': [],
             'prices': [],
@@ -70,16 +69,26 @@ class CMELiveDataFetcher:
         self.logger.log('INFO', 'reset_price_data', "Price data has been reset for new session")
 
     def get_next_market_open(self) -> datetime:
+        """
+        次の平日9:30に相当する日付に対して、
+        30分前(9:00)を返すようにする。
+        """
         now = datetime.now(self.ny_tz)
         market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        # すでに9:30を過ぎていれば翌営業日へ
         if now >= market_open:
             market_open += timedelta(days=1)
-        while market_open.weekday() in [5, 6]:
+        # 土日をスキップして次の月曜日へ
+        while market_open.weekday() in [5, 6]:  # 5:土曜, 6:日曜
             days_until_monday = (7 - market_open.weekday()) % 7
             market_open += timedelta(days=days_until_monday)
+        # 9:00(9:30の30分前)を開始時刻とする
         return market_open - timedelta(minutes=30)
 
     def get_market_close(self, target_date: datetime) -> datetime:
+        """
+        9:00に対する当日の市場クローズ(16:00)を返す。
+        """
         return target_date.replace(hour=16, minute=0, second=0, microsecond=0)
 
     async def setup_subscription(self, symbols: str = "NQ.c.0"):
@@ -103,6 +112,10 @@ class CMELiveDataFetcher:
         asyncio.create_task(self._process_bar_async(record))
 
     async def _process_bar_async(self, record) -> None:
+        """
+        受信したレコードを非同期で処理する。
+        ここで base_price の設定タイミングを 9:30 以降に限定する修正を行う。
+        """
         try:
             if isinstance(record, SymbolMappingMsg):
                 self.instrument_id_map[record.instrument_id] = record.stype_out_symbol
@@ -130,19 +143,25 @@ class CMELiveDataFetcher:
                                     .tz_localize("UTC")
                                     .tz_convert(self.ny_tz))
                     
-                    # base_price セット
+                    # まだ base_price が設定されていない場合、
+                    # かつ "9:30 以降" のバーであれば base_price をセットする。
                     if self.price_data[mapped_symbol]['base_price'] is None:
-                        self.price_data[mapped_symbol]['base_price'] = bar_data['close']
+                        # 9:30 以降（hour == 9 and minute >= 30）か、あるいは hour > 9 であればセット
+                        if (current_time.hour > 9) or (current_time.hour == 9 and current_time.minute >= 30):
+                            self.price_data[mapped_symbol]['base_price'] = bar_data['close']
                     
+                    # いずれにせよ記録は続ける
                     self.price_data[mapped_symbol]['times'].append(current_time)
                     self.price_data[mapped_symbol]['prices'].append(bar_data['close'])
                     
                     base = self.price_data[mapped_symbol]['base_price']
                     if base is not None:
                         ret = (bar_data['close'] / base - 1) * 100
-                        self.price_data[mapped_symbol]['returns'].append(ret)
                     else:
-                        self.price_data[mapped_symbol]['returns'].append(0.0)
+                        # まだ9:30より前なので、リターンは0%としておく
+                        ret = 0.0
+                    
+                    self.price_data[mapped_symbol]['returns'].append(ret)
 
                 self.logger.log('INFO','process_bar',
                     f"OHLCV Data: {bar_data}, Return={self.price_data[mapped_symbol]['returns'][-1]:.2f}%")
@@ -154,7 +173,11 @@ class CMELiveDataFetcher:
             self.logger.log('ERROR','process_bar', f"Error: {str(e)}")
 
     async def run_session(self, market_close: datetime):
+        """
+        1度のセッションで、9:00〜16:00までデータを購読して待機する処理を行う。
+        """
         try:
+            # セッション開始前にデータ初期化
             await self.reset_price_data()
             await self.setup_subscription()
             self.client.add_callback(record_callback=self.process_bar)
@@ -164,6 +187,7 @@ class CMELiveDataFetcher:
             now = datetime.now(self.ny_tz)
             wait_seconds = (market_close - now).total_seconds()
             if wait_seconds > 0:
+                # market_close まで待つ
                 await self.client.wait_for_close(timeout=wait_seconds)
 
         except Exception as e:
@@ -176,14 +200,19 @@ class CMELiveDataFetcher:
             await self.reset_price_data()
 
     async def run_async(self):
+        """
+        メインループ。
+        - debug_mode=True の場合、24時間走らせるイメージ
+        - debug_mode=False の場合、本来の営業日サイクルで 9:00〜16:00 を繰り返す
+        """
         while True:
             try:
                 if self.debug_mode:
-                    # デバッグ中は「明日まで走らせる」イメージ
+                    # デバッグ中は「今から24時間後まで走らせる」イメージ
                     await self.run_session(datetime.now(self.ny_tz) + timedelta(hours=24))
                 else:
-                    next_open = self.get_next_market_open()
-                    mclose = self.get_market_close(next_open)
+                    next_open = self.get_next_market_open()  # 例: 明日9:00
+                    mclose = self.get_market_close(next_open) # 例: 当日の16:00
                     now = datetime.now(self.ny_tz)
                     wait_secs = (next_open - now).total_seconds()
                     if wait_secs > 0:
@@ -192,7 +221,8 @@ class CMELiveDataFetcher:
 
             except Exception as e:
                 self.logger.log('ERROR','run_async', f"Main loop error: {str(e)}")
-                await asyncio.sleep(300)  # 5分待ってリトライ
+                # 5分待って再トライ
+                await asyncio.sleep(300)
 
     def get_data_copy(self, symbol: str):
         """
