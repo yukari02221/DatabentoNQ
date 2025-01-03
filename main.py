@@ -1,9 +1,9 @@
-import databento as db
 from logging_utils import CustomLogger
 import asyncio
 import winsound
 import pandas as pd
 from databento_dbn import SymbolMappingMsg, OHLCVMsg, SystemMsg
+from databento_client import DatabentoClient, DatabentoCommunicationError
 import os
 from typing import Optional, Dict
 from datetime import datetime, timedelta
@@ -25,12 +25,9 @@ class CMELiveDataFetcher:
         if not self.api_key:
             raise ValueError("API key must be provided.")
         
-        self.client = None
-        self.audio_played_today = False
-        self.logger.log('INFO', 'init', "CMELiveDataFetcher initialized")
-        
+        self.databento_client = DatabentoClient(api_key)
+        self.audio_played_today = False      
         self.instrument_id_map = {}
-        
         # price_data[symbol] の中に times / returns などを格納
         self.price_data: Dict[str, Dict] = defaultdict(lambda: {
             'times': [],
@@ -41,12 +38,10 @@ class CMELiveDataFetcher:
         })
 
         self.ny_tz = pytz.timezone('America/New_York')
-        self.logger.log('INFO', 'init', f"Timezone set to: {self.ny_tz}")
-        
+        self.logger.log('INFO', 'init', f"Timezone set to: {self.ny_tz}")    
         self.debug_mode = debug_mode
         if self.debug_mode:
-            self.logger.log('INFO', 'init', "Running in debug mode")
-        
+            self.logger.log('INFO', 'init', "Running in debug mode")     
         # スレッドセーフにするためのロック
         self.lock = threading.Lock()
         
@@ -54,8 +49,7 @@ class CMELiveDataFetcher:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.client:
-            self.client.stop()
+        self.databento_client.stop()
         await self.reset_price_data()
 
     async def reset_price_data(self):
@@ -92,23 +86,6 @@ class CMELiveDataFetcher:
         9:00に対する当日の市場クローズ(16:00)を返す。
         """
         return target_date.replace(hour=16, minute=0, second=0, microsecond=0)
-
-    async def setup_subscription(self, symbols: str = "NQ.c.0"):
-        try:
-            if self.client:
-                self.client.stop()
-            self.client = db.Live(key=self.api_key)
-            self.client.subscribe(
-                dataset="GLBX.MDP3",
-                schema="ohlcv-1m",
-                stype_in="continuous",
-                symbols=symbols,
-                start="now",
-            )
-            self.logger.log("INFO", "setup_subscription", f"Subscription done for {symbols}")
-        except Exception as e:
-            self.logger.log("ERROR", "setup_subscription", f"Failed: {str(e)}")
-            raise
 
     def process_bar(self, record) -> None:
         asyncio.create_task(self._process_bar_async(record))
@@ -181,23 +158,20 @@ class CMELiveDataFetcher:
         try:
             # セッション開始前にデータ初期化
             await self.reset_price_data()
-            await self.setup_subscription()
-            self.client.add_callback(record_callback=self.process_bar)
-            self.client.start()
+            await self.databento_client.setup_subscription()
+            self.databento_client.start(self.process_bar)
             self.logger.log('INFO','run_session', "Streaming started")
 
             now = datetime.now(self.ny_tz)
             wait_seconds = (market_close - now).total_seconds()
             if wait_seconds > 0:
-                # market_close まで待つ
-                await self.client.wait_for_close(timeout=wait_seconds)
+                await self.databento_client.wait_for_close(timeout=wait_seconds)
 
         except Exception as e:
             self.logger.log('ERROR','run_session', f"Error: {str(e)}")
             raise
         finally:
-            if self.client:
-                self.client.stop()
+            self.databento_client.stop()
             self.logger.log('INFO','run_session', "Streaming stopped")
             await self.reset_price_data()
 
