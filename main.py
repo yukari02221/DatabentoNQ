@@ -189,8 +189,7 @@ class CMELiveDataFetcher:
                         self.logger.log('INFO', 'audio', "Played morning announcement (DEBUG)")
                     except Exception as e:
                         self.logger.log('ERROR', 'audio', f"Failed to play audio: {str(e)}")
-                    await asyncio.sleep(5)  # デバッグモードでは5秒後に終了
-                    sys.exit(0)
+
             elif now.hour == 9 and now.minute == 15 and not self.audio_played_today:
                 try:
                     winsound.PlaySound('resource\\NY市場前朝礼.wav', winsound.SND_FILENAME)
