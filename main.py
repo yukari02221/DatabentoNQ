@@ -1,6 +1,7 @@
 import databento as db
 from logging_utils import CustomLogger
 import asyncio
+import winsound
 import pandas as pd
 from databento_dbn import SymbolMappingMsg, OHLCVMsg, SystemMsg
 import os
@@ -25,6 +26,7 @@ class CMELiveDataFetcher:
             raise ValueError("API key must be provided.")
         
         self.client = None
+        self.audio_played_today = False
         self.logger.log('INFO', 'init', "CMELiveDataFetcher initialized")
         
         self.instrument_id_map = {}
@@ -199,12 +201,42 @@ class CMELiveDataFetcher:
             self.logger.log('INFO','run_session', "Streaming stopped")
             await self.reset_price_data()
 
+    async def check_and_play_audio(self):
+        while True:
+            now = datetime.now(self.ny_tz)
+            if self.debug_mode:
+                # デバッグモード時は現在時刻を9:15に強制
+                debug_now = now.replace(hour=9, minute=15)
+                if not self.audio_played_today:
+                    self.logger.log('DEBUG', 'audio', f"Debug time: {debug_now}")
+                    try:
+                        winsound.PlaySound(r'resorce\NY市場前朝礼.wav', winsound.SND_FILENAME)
+                        self.audio_played_today = True
+                        self.logger.log('INFO', 'audio', "Played morning announcement (DEBUG)")
+                    except Exception as e:
+                        self.logger.log('ERROR', 'audio', f"Failed to play audio: {str(e)}")
+                    await asyncio.sleep(5)  # デバッグモードでは5秒後に終了
+                    sys.exit(0)
+            elif now.hour == 9 and now.minute == 15 and not self.audio_played_today:
+                try:
+                    winsound.PlaySound('resource\\NY市場前朝礼.wav', winsound.SND_FILENAME)
+                    self.audio_played_today = True
+                    self.logger.log('INFO', 'audio', "Played morning announcement")
+                except Exception as e:
+                    self.logger.log('ERROR', 'audio', f"Failed to play audio: {str(e)}")
+            
+            if now.hour == 0 and now.minute == 0:
+                self.audio_played_today = False
+            
+            await asyncio.sleep(30)
+
     async def run_async(self):
         """
         メインループ。
         - debug_mode=True の場合、24時間走らせるイメージ
         - debug_mode=False の場合、本来の営業日サイクルで 9:00〜16:00 を繰り返す
         """
+        asyncio.create_task(self.check_and_play_audio())
         while True:
             try:
                 if self.debug_mode:
@@ -319,7 +351,7 @@ def main():
     parser.add_argument('--symbol', default='NQ.c.0', help='Symbol to subscribe')
     args = parser.parse_args()
 
-    fetcher = CMELiveDataFetcher(debug_mode=False)
+    fetcher = CMELiveDataFetcher(debug_mode=True)
 
     # 2) バックグラウンドスレッドで fetcher を起動
     fetcher_thread = threading.Thread(
