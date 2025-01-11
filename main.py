@@ -300,7 +300,7 @@ def main():
     parser.add_argument('--symbol', default='NQ.c.0', help='Symbol to subscribe')
     args = parser.parse_args()
 
-    fetcher = CMELiveDataFetcher(debug_mode=True)
+    fetcher = CMELiveDataFetcher(debug_mode=False)
 
     # 2) バックグラウンドスレッドで fetcher を起動
     fetcher_thread = threading.Thread(
