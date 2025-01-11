@@ -4,6 +4,7 @@ import winsound
 import pandas as pd
 from databento_dbn import SymbolMappingMsg, OHLCVMsg, SystemMsg
 from databento_client import DatabentoClient, DatabentoCommunicationError
+from audio_manager import AudioManager
 import os
 from typing import Optional, Dict
 from datetime import datetime, timedelta
@@ -26,7 +27,7 @@ class CMELiveDataFetcher:
             raise ValueError("API key must be provided.")
         
         self.databento_client = DatabentoClient(api_key)
-        self.audio_played_today = False      
+        self.audio_manager = AudioManager(debug_mode)      
         self.instrument_id_map = {}
         # price_data[symbol] の中に times / returns などを格納
         self.price_data: Dict[str, Dict] = defaultdict(lambda: {
@@ -97,11 +98,14 @@ class CMELiveDataFetcher:
         """
         try:
             if isinstance(record, SymbolMappingMsg):
-                self.instrument_id_map[record.instrument_id] = record.stype_out_symbol
-                self.logger.log('INFO','process_bar',
-                    f"Symbol Mapping: ID={record.instrument_id}, "
-                    f"Out={record.stype_out_symbol}, Time={record.pretty_ts_event}"
-                )
+                symbol = record.stype_out_symbol
+                # 既に登録済みのシンボルの場合はログを出力しない
+                if record.instrument_id not in self.instrument_id_map:
+                    self.instrument_id_map[record.instrument_id] = symbol
+                    self.logger.log('INFO', 'process_bar',
+                        f"Symbol Mapping: ID={record.instrument_id}, "
+                        f"Out={symbol}, Time={record.pretty_ts_event}"
+                    )
 
             elif isinstance(record, SystemMsg):
                 self.logger.log('INFO','process_bar', f"System Message: {record.msg}")
@@ -175,41 +179,13 @@ class CMELiveDataFetcher:
             self.logger.log('INFO','run_session', "Streaming stopped")
             await self.reset_price_data()
 
-    async def check_and_play_audio(self):
-        while True:
-            now = datetime.now(self.ny_tz)
-            if self.debug_mode:
-                # デバッグモード時は現在時刻を9:15に強制
-                debug_now = now.replace(hour=9, minute=15)
-                if not self.audio_played_today:
-                    self.logger.log('DEBUG', 'audio', f"Debug time: {debug_now}")
-                    try:
-                        winsound.PlaySound(r'resorce\NY市場前朝礼.wav', winsound.SND_FILENAME)
-                        self.audio_played_today = True
-                        self.logger.log('INFO', 'audio', "Played morning announcement (DEBUG)")
-                    except Exception as e:
-                        self.logger.log('ERROR', 'audio', f"Failed to play audio: {str(e)}")
-
-            elif now.hour == 9 and now.minute == 15 and not self.audio_played_today:
-                try:
-                    winsound.PlaySound('resource\\NY市場前朝礼.wav', winsound.SND_FILENAME)
-                    self.audio_played_today = True
-                    self.logger.log('INFO', 'audio', "Played morning announcement")
-                except Exception as e:
-                    self.logger.log('ERROR', 'audio', f"Failed to play audio: {str(e)}")
-            
-            if now.hour == 0 and now.minute == 0:
-                self.audio_played_today = False
-            
-            await asyncio.sleep(30)
-
     async def run_async(self):
         """
         メインループ。
         - debug_mode=True の場合、24時間走らせるイメージ
         - debug_mode=False の場合、本来の営業日サイクルで 9:00〜16:00 を繰り返す
         """
-        asyncio.create_task(self.check_and_play_audio())
+        asyncio.create_task(self.audio_manager.check_and_play_audio())
         while True:
             try:
                 if self.debug_mode:
@@ -324,7 +300,7 @@ def main():
     parser.add_argument('--symbol', default='NQ.c.0', help='Symbol to subscribe')
     args = parser.parse_args()
 
-    fetcher = CMELiveDataFetcher(debug_mode=True)
+    fetcher = CMELiveDataFetcher(debug_mode=False)
 
     # 2) バックグラウンドスレッドで fetcher を起動
     fetcher_thread = threading.Thread(
