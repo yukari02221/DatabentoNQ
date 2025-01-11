@@ -232,8 +232,12 @@ class MainWindow(QtWidgets.QMainWindow):
             'Q3': 0.298,
             'Q4': 0.424            
         }
-        csv_path = "subsequent_volatility_distribution.csv"
-        self.subsequent_vol_df = pd.read_csv(csv_path)
+        try:
+            csv_path = "subsequent_volatility_distribution.csv"
+            self.subsequent_vol_df = pd.read_csv(csv_path)
+        except FileNotFoundError:
+            self.logger.log('ERROR','MainWindow', f"{csv_path} not found. Volatility analysis will be disabled.")
+            self.subsequent_vol_df = None
         
         # ウィンドウタイトル
         self.setWindowTitle(f"Market Monitor - {self.symbol}")
@@ -255,29 +259,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.volatility_curve = self.plot_widget.plot([],[],
                                                       pen=pg.mkPen('b', width=2),
                                                       name='Volatility')
+        # 正のσライン
         self.sigma1_line = self.plot_widget.plot([], [],
                                                  pen=pg.mkPen('g', style=Qt.DashLine),
                                                  name='1σ')
         self.sigma2_line = self.plot_widget.plot([], [],
                                                  pen=pg.mkPen('r', style=Qt.DashLine),
                                                  name='2σ')
+        # 負のσライン
+        self.sigma1_line_neg = self.plot_widget.plot([],[],
+                                                   pen=pg.mkPen('g', style=Qt.DashLine),
+                                                   name='-1σ')
+        self.sigma2_line_neg = self.plot_widget.plot([],[],
+                                                   pen=pg.mkPen('r', style=Qt.DashLine),
+                                                   name='-2σ')
 
         # Plotの見た目調整
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_widget.setLabel('left', 'Change Rate (%)')
         self.plot_widget.setLabel('bottom', 'Time (min from open)')
-        
-        # 凡例の追加
         self.plot_widget.addLegend()
         
-        # データバッファ
         self.volatility_buffer = []
         self.vol_times_buffer = []
-        # X軸を「整数 or float」のままで扱う (実際は経過秒などでOK)
-        # ここでは「秒単位の経過時間」を X 軸にしてみる例にします
-        # start_time に最初の約定データが来た時刻を記録し、そこからの差分（秒）を x とする
         self.start_time = None
-        # 初期ボラがどの quartile に属するかをまだ判定していないフラグ
         self.current_quartile = None
         
         
@@ -356,18 +361,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if len(x_periods) > 1:
                 self.sigma1_line.setData(x_periods, sigma1_values)
                 self.sigma2_line.setData(x_periods, sigma2_values)
+                # 負のシグマライン（値を反転）
+                self.sigma1_line_neg.setData(x_periods, [-v for v in sigma1_values])
+                self.sigma2_line_neg.setData(x_periods, [-v for v in sigma2_values])
             else:
                 self.sigma1_line.clear()
                 self.sigma2_line.clear()
+                self.sigma1_line_neg.clear()
+                self.sigma2_line_neg.clear()
         # 4) Y軸の範囲を調整 (リターン, σライン など含める)
         y_candidates = list(returns)
         # sigma1_line / sigma2_line のデータも含めてレンジ計算
         _, y_s1 = self.sigma1_line.getData()
         _, y_s2 = self.sigma2_line.getData()
-        if y_s1 is not None:
-            y_candidates.extend(y_s1)
-        if y_s2 is not None:
-            y_candidates.extend(y_s2)
+        _, y_s1_neg = self.sigma1_line_neg.getData()
+        _, y_s2_neg = self.sigma2_line_neg.getData()
+        for y_data in [y_s1, y_s2, y_s1_neg, y_s2_neg]:
+            if y_data is not None:
+                y_candidates.extend(y_data)
             
         if y_candidates:
             ymin = min(y_candidates)
