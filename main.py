@@ -14,6 +14,7 @@ from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import Qt
 import pyqtgraph as pg
 import sys
+import numpy as np
 
 # -------------------------------------------------
 # (A) 非同期でデータを取得し、価格データとリターンを保持するだけのクラス
@@ -285,12 +286,82 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_time = None
         self.current_quartile = None
         
+        # 極地の追跡用の変数
+        self.sigma_shift_upper = 0  # 上側のσライン用
+        self.sigma_shift_lower = 0  # 下側のσライン用
+        self.max_return = float('-inf')
+        self.min_return = float('inf')
+
+        # 初期σライン値を保持する変数を追加
+        self.initial_sigma_values = {
+            'times': [],
+            'sigma1_upper': [],
+            'sigma2_upper': [],
+            'sigma1_lower': [],
+            'sigma2_lower': []
+        }
+        
+        # σライン初期化済みフラグ
+        self.sigma_lines_initialized = False        
         
         # 一定間隔でタイマー起動→ update_plot()
         self.timer = QtCore.QTimer()
         self.timer.setInterval(1000)  # 1秒ごとに更新
         self.timer.timeout.connect(self.update_plot)
         self.timer.start()
+
+    def initialize_sigma_lines(self):
+        """初期のσライン値を計算して保存"""
+        if not self.current_quartile or self.sigma_lines_initialized:
+            return
+            
+        print(f"Initializing sigma lines for quartile {self.current_quartile}")
+        
+        # 現在のx_valsに基づいて時間点を生成
+        times, returns = self.fetcher.get_data_copy(self.symbol)
+        if len(times) == 0:
+            return
+            
+        x_vals = [(t - self.start_time).total_seconds() / 60 for t in times]
+        max_time = max(x_vals)
+        
+        # より細かい時間点を生成（滑らかな曲線のため）
+        time_points = np.linspace(0, max(360, max_time), 100)
+        
+        # 各時間点でのσ値を計算
+        sigma1_upper = []
+        sigma2_upper = []
+        sigma1_lower = []
+        sigma2_lower = []
+        
+        for t in time_points:
+            # 最も近い期間を見つける
+            closest_period = min([5, 30, 60, 240, 360], 
+                               key=lambda x: abs(x - t))
+            
+            df_q = self.subsequent_vol_df[
+                (self.subsequent_vol_df['quartile'] == self.current_quartile) &
+                (self.subsequent_vol_df['period'] == f"{closest_period}min")
+            ]
+            
+            if not df_q.empty:
+                mean_ = df_q['subsequent_volatility'].mean()
+                std_ = df_q['subsequent_volatility'].std()
+                
+                sigma1_upper.append(mean_ + std_)
+                sigma2_upper.append(mean_ + 2 * std_)
+                sigma1_lower.append(-(mean_ + std_))
+                sigma2_lower.append(-(mean_ + 2 * std_))
+        
+        # 初期値を保存
+        self.initial_sigma_values['times'] = time_points
+        self.initial_sigma_values['sigma1_upper'] = sigma1_upper
+        self.initial_sigma_values['sigma2_upper'] = sigma2_upper
+        self.initial_sigma_values['sigma1_lower'] = sigma1_lower
+        self.initial_sigma_values['sigma2_lower'] = sigma2_lower
+        
+        self.sigma_lines_initialized = True
+        self.update_sigma_lines()  # 初期描画
         
     def calculate_initial_volatility(self, prices):
         """寄付きから一定範囲(例:最初の5分)のHLボラティリティを調べるなど"""
@@ -318,75 +389,151 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(times) == 0:
             return
 
-        # タイムスタンプ処理の修正
+        # タイムスタンプ処理
         if self.start_time is None and times:
             self.start_time = times[0]
 
-        x_vals = [(t - self.start_time).total_seconds() / 60 for t in times]       
-        # 折れ線データ更新
+        x_vals = [(t - self.start_time).total_seconds() / 60 for t in times]
+        
+        # 1. リターンの折れ線データ更新
         self.return_curve.setData(x_vals, returns)
-        # もしまだ quartile 判定をしていないなら、寄付き直後の価格から初期ボラを計算し決定
-        if self.current_quartile is None:
-            # 例: 最初のN本(例えば5本)のOHLCなどを用いて HLボラを計算する
-            # ここでは適当に returns から max/min を取る例にする
-            if len(returns) > 5:
-                init_vol = self.calculate_initial_volatility(returns[:5])
-                self.current_quartile = self.determine_quartile(init_vol)
-                
-        if self.current_quartile:
-            period_list = [5, 30, 60, 240, 360]
-            x_periods = []
-            sigma1_values = []
-            sigma2_values = []
-            for p in period_list:
-                # (a) quartile + period に合致 & 値が存在するデータを抽出
-                df_q = self.subsequent_vol_df[
-                    (self.subsequent_vol_df['quartile'] == self.current_quartile) &
-                    (self.subsequent_vol_df['period'] == f"{p}min") &
-                    (self.subsequent_vol_df['subsequent_volatility'].notnull())    
-                ]
-                
-                if not df_q.empty:
-                    mean_ = df_q['subsequent_volatility'].mean()
-                    std_ = df_q['subsequent_volatility'].std()
-                    sigma1 = mean_ + std_
-                    sigma2 = mean_ + 2 * std_
-                    x_periods.append(p)     # x軸 = p(分)
-                    sigma1_values.append(sigma1)
-                    sigma2_values.append(sigma2)
-                else:
-                    pass
-            # (b) x_periods, sigma1_values, sigma2_values を用いて線を描画
-            # 5/30/60/240/360 の点を結ぶ折れ線にする
-            if len(x_periods) > 1:
-                self.sigma1_line.setData(x_periods, sigma1_values)
-                self.sigma2_line.setData(x_periods, sigma2_values)
-                # 負のシグマライン（値を反転）
-                self.sigma1_line_neg.setData(x_periods, [-v for v in sigma1_values])
-                self.sigma2_line_neg.setData(x_periods, [-v for v in sigma2_values])
-            else:
-                self.sigma1_line.clear()
-                self.sigma2_line.clear()
-                self.sigma1_line_neg.clear()
-                self.sigma2_line_neg.clear()
-        # 4) Y軸の範囲を調整 (リターン, σライン など含める)
+
+        # 2. 四分位数の初期判定（まだ実施していない場合）
+        if self.current_quartile is None and len(returns) > 5:
+            init_vol = self.calculate_initial_volatility(returns[:5])
+            self.current_quartile = self.determine_quartile(init_vol)
+            # σラインの初期化と描画
+            self.initialize_sigma_lines()
+
+        # 高値/安値の更新チェックとシフト量の計算
+        if returns and self.current_quartile:
+            current_max = max(returns)
+            current_min = min(returns)
+            shift_updated = False
+            
+            if self.max_return == float('-inf'):
+                self.max_return = current_max
+            if self.min_return == float('inf'):
+                self.min_return = current_min
+
+            # σラインが描画されているか確認
+            sigma_data = self.sigma1_line.getData()
+            if sigma_data[0] is None or len(sigma_data[0]) == 0:
+                print("Initial sigma line drawing")
+                self.update_sigma_lines()
+                return
+
+            # -------------------------
+            # 高値更新 => 下側ライン(-1σ, -2σ)を上に動かす
+            # -------------------------
+            if current_max > self.max_return:
+                print(f"[High Update] current_max={current_max} > old={self.max_return}")
+                # たとえば "差分 = current_max - self.max_return" を
+                # sigma_shift_lower にプラスして、下側ラインがその分だけ上昇
+                diff = (current_max - self.max_return)
+                old_shift = self.sigma_shift_lower
+                self.sigma_shift_lower += diff
+                print(f"   sigma_shift_lower: {old_shift} -> {self.sigma_shift_lower}")
+                shift_updated = True
+
+            # -------------------------
+            # 安値更新 => 上側ライン(+1σ, +2σ)を下に動かす
+            # -------------------------
+            if current_min < self.min_return:
+                print(f"[Low Update] current_min={current_min} < old={self.min_return}")
+                # 差分 = current_min - old_min は負の値
+                # これを sigma_shift_upper に加算 => 上側ラインがその分だけ下に移動
+                diff = (current_min - self.min_return)
+                old_shift = self.sigma_shift_upper
+                self.sigma_shift_upper += diff
+                print(f"   sigma_shift_upper: {old_shift} -> {self.sigma_shift_upper}")
+                shift_updated = True
+
+            # max/min の更新
+            if current_max > self.max_return:
+                self.max_return = current_max
+            if current_min < self.min_return:
+                self.min_return = current_min
+
+            # もしシフト値が変わったらライン再描画
+            if shift_updated:
+                print(f"[Update Sigma] upper={self.sigma_shift_upper}, lower={self.sigma_shift_lower}")
+                self.update_sigma_lines()
+
+        # 5. プロット範囲の調整
+        self.adjust_plot_ranges(x_vals, returns)
+
+    def update_sigma_lines(self):
+        """保存された初期値にシフト量を適用して再描画"""
+        if not self.sigma_lines_initialized:
+            self.initialize_sigma_lines()
+            return
+            
+        print(f"Updating sigma lines with shifts - Upper: {self.sigma_shift_upper}, Lower: {self.sigma_shift_lower}")
+        
+        # シフト量を適用して再描画
+        times = self.initial_sigma_values['times']
+        
+        # 上側のライン
+        sigma1_upper = [v + self.sigma_shift_upper for v in self.initial_sigma_values['sigma1_upper']]
+        sigma2_upper = [v + self.sigma_shift_upper for v in self.initial_sigma_values['sigma2_upper']]
+        
+        # 下側のライン
+        sigma1_lower = [v + self.sigma_shift_lower for v in self.initial_sigma_values['sigma1_lower']]
+        sigma2_lower = [v + self.sigma_shift_lower for v in self.initial_sigma_values['sigma2_lower']]
+        
+        # σラインの描画前後の値を確認
+        print("\nBefore setData:")
+        old_sigma1_upper = self.sigma1_line.getData()[1]
+        old_sigma2_upper = self.sigma2_line.getData()[1]
+        old_sigma1_lower = self.sigma1_line_neg.getData()[1]
+        old_sigma2_lower = self.sigma2_line_neg.getData()[1]
+        
+        if old_sigma1_upper is not None:
+            print(f"Upper σ1: {old_sigma1_upper[0]:.4f} -> {sigma1_upper[0]:.4f}")
+            print(f"Upper σ2: {old_sigma2_upper[0]:.4f} -> {sigma2_upper[0]:.4f}")
+            print(f"Lower σ1: {old_sigma1_lower[0]:.4f} -> {sigma1_lower[0]:.4f}")
+            print(f"Lower σ2: {old_sigma2_lower[0]:.4f} -> {sigma2_lower[0]:.4f}")
+        
+        # σラインの描画
+        self.sigma1_line.setData(times, sigma1_upper)
+        self.sigma2_line.setData(times, sigma2_upper)
+        self.sigma1_line_neg.setData(times, sigma1_lower)
+        self.sigma2_line_neg.setData(times, sigma2_lower)
+        
+        # 描画後の値を再度確認
+        print("\nAfter setData:")
+        current_sigma1_upper = self.sigma1_line.getData()[1]
+        current_sigma2_upper = self.sigma2_line.getData()[1]
+        current_sigma1_lower = self.sigma1_line_neg.getData()[1]
+        current_sigma2_lower = self.sigma2_line_neg.getData()[1]
+        
+        if current_sigma1_upper is not None:
+            print(f"Upper σ1: {current_sigma1_upper[0]:.4f}")
+            print(f"Upper σ2: {current_sigma2_upper[0]:.4f}")
+            print(f"Lower σ1: {current_sigma1_lower[0]:.4f}")
+            print(f"Lower σ2: {current_sigma2_lower[0]:.4f}")
+
+    def adjust_plot_ranges(self, x_vals, returns):
+        """プロットの表示範囲を調整"""
+        # Y軸の範囲調整
         y_candidates = list(returns)
-        # sigma1_line / sigma2_line のデータも含めてレンジ計算
         _, y_s1 = self.sigma1_line.getData()
         _, y_s2 = self.sigma2_line.getData()
         _, y_s1_neg = self.sigma1_line_neg.getData()
         _, y_s2_neg = self.sigma2_line_neg.getData()
+        
         for y_data in [y_s1, y_s2, y_s1_neg, y_s2_neg]:
             if y_data is not None:
                 y_candidates.extend(y_data)
-            
+        
         if y_candidates:
             ymin = min(y_candidates)
             ymax = max(y_candidates)
             yrange = ymax - ymin
             self.plot_widget.setYRange(ymin - 0.1*yrange, ymax + 0.1*yrange)
-            
-        # x軸の範囲:
+        
+        # X軸の範囲調整
         if x_vals:
             self.plot_widget.setXRange(0, max(x_vals) + 1)
                     
