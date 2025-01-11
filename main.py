@@ -1,6 +1,5 @@
 from logging_utils import CustomLogger
 import asyncio
-import winsound
 import pandas as pd
 from databento_dbn import SymbolMappingMsg, OHLCVMsg, SystemMsg
 from databento_client import DatabentoClient, DatabentoCommunicationError
@@ -12,6 +11,7 @@ import pytz
 from collections import defaultdict
 import threading
 from PyQt5 import QtWidgets, QtCore
+from PyQt5.QtCore import Qt
 import pyqtgraph as pg
 import sys
 
@@ -223,41 +223,89 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, fetcher: CMELiveDataFetcher, symbol: str):
         super().__init__()
         self.fetcher = fetcher
-        self.symbol = "NQH5"
+        self.symbol = symbol
+        
+        #四分位数の境界値
+        self.quartile_boundaries = {
+            'Q1': 0.195,
+            'Q2': 0.249,
+            'Q3': 0.298,
+            'Q4': 0.424            
+        }
+        csv_path = "subsequent_volatility_distribution.csv"
+        self.subsequent_vol_df = pd.read_csv(csv_path)
         
         # ウィンドウタイトル
-        self.setWindowTitle(f"Realtime Returns - {self.symbol}")
-        self.resize(800, 600)
+        self.setWindowTitle(f"Market Monitor - {self.symbol}")
+        self.resize(1200, 800)
 
         # 中央ウィジェット
         self.central_widget = QtWidgets.QWidget()
         self.setCentralWidget(self.central_widget)
-        
-        # レイアウト
         layout = QtWidgets.QVBoxLayout(self.central_widget)
 
         # pyqtgraph の PlotWidget を用意
         self.plot_widget = pg.PlotWidget()
         layout.addWidget(self.plot_widget)
+        
+        # plot itemの初期化
+        self.return_curve = self.plot_widget.plot([],[],
+                                                  pen=pg.mkPen('y', width=2),
+                                                  name='Return')
+        self.volatility_curve = self.plot_widget.plot([],[],
+                                                      pen=pg.mkPen('b', width=2),
+                                                      name='Volatility')
+        self.sigma1_line = self.plot_widget.plot([], [],
+                                                 pen=pg.mkPen('g', style=Qt.DashLine),
+                                                 name='1σ')
+        self.sigma2_line = self.plot_widget.plot([], [],
+                                                 pen=pg.mkPen('r', style=Qt.DashLine),
+                                                 name='2σ')
 
-        # 折れ線用の PlotDataItem
-        self.curve = self.plot_widget.plot([], [], pen='y')
-
+        # Plotの見た目調整
+        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.setLabel('left', 'Change Rate (%)')
+        self.plot_widget.setLabel('bottom', 'Time (min from open)')
+        
+        # 凡例の追加
+        self.plot_widget.addLegend()
+        
+        # データバッファ
+        self.volatility_buffer = []
+        self.vol_times_buffer = []
         # X軸を「整数 or float」のままで扱う (実際は経過秒などでOK)
         # ここでは「秒単位の経過時間」を X 軸にしてみる例にします
         # start_time に最初の約定データが来た時刻を記録し、そこからの差分（秒）を x とする
         self.start_time = None
-
-        # Plotの見た目調整
-        self.plot_widget.showGrid(x=True, y=True)
-        self.plot_widget.setLabel('bottom', 'Time (sec from first data)')
-        self.plot_widget.setLabel('left', 'Return from Open (%)')
-
+        # 初期ボラがどの quartile に属するかをまだ判定していないフラグ
+        self.current_quartile = None
+        
+        
         # 一定間隔でタイマー起動→ update_plot()
         self.timer = QtCore.QTimer()
         self.timer.setInterval(1000)  # 1秒ごとに更新
         self.timer.timeout.connect(self.update_plot)
         self.timer.start()
+        
+    def calculate_initial_volatility(self, prices):
+        """寄付きから一定範囲(例:最初の5分)のHLボラティリティを調べるなど"""
+        if not prices:
+            return 0.0
+        high = max(prices)
+        low = min(prices)
+        return ((high - low) / low) * 100
+    
+    def determine_quartile(self, value):
+        """value (初期ボラ) に応じて Q1/Q2/Q3/Q4 を返す"""
+        # 例えば:
+        if value < self.quartile_boundaries['Q1']:
+            return 'Q1'
+        elif value < self.quartile_boundaries['Q2']:
+            return 'Q2'
+        elif value < self.quartile_boundaries['Q3']:
+            return 'Q3'
+        else:
+            return 'Q4'        
 
     def update_plot(self):
         # データ取得
@@ -265,17 +313,72 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(times) == 0:
             return
 
-        # 最初のデータを基準にして秒数を計算
-        # times は pydatetime 付き pandas.Timestamp なので、.timestamp() で epoch秒に変換
-        if self.start_time is None:
-            self.start_time = times[0].timestamp()
+        # タイムスタンプ処理の修正
+        if self.start_time is None and times:
+            self.start_time = times[0]
 
-        x_vals = [t.timestamp() - self.start_time for t in times]
-        y_vals = returns
-        
+        x_vals = [(t - self.start_time).total_seconds() / 60 for t in times]       
         # 折れ線データ更新
-        self.curve.setData(x_vals, y_vals)
-
+        self.return_curve.setData(x_vals, returns)
+        # もしまだ quartile 判定をしていないなら、寄付き直後の価格から初期ボラを計算し決定
+        if self.current_quartile is None:
+            # 例: 最初のN本(例えば5本)のOHLCなどを用いて HLボラを計算する
+            # ここでは適当に returns から max/min を取る例にする
+            if len(returns) > 5:
+                init_vol = self.calculate_initial_volatility(returns[:5])
+                self.current_quartile = self.determine_quartile(init_vol)
+                
+        if self.current_quartile:
+            period_list = [5, 30, 60, 240, 360]
+            x_periods = []
+            sigma1_values = []
+            sigma2_values = []
+            for p in period_list:
+                # (a) quartile + period に合致 & 値が存在するデータを抽出
+                df_q = self.subsequent_vol_df[
+                    (self.subsequent_vol_df['quartile'] == self.current_quartile) &
+                    (self.subsequent_vol_df['period'] == f"{p}min") &
+                    (self.subsequent_vol_df['subsequent_volatility'].notnull())    
+                ]
+                
+                if not df_q.empty:
+                    mean_ = df_q['subsequent_volatility'].mean()
+                    std_ = df_q['subsequent_volatility'].std()
+                    sigma1 = mean_ + std_
+                    sigma2 = mean_ + 2 * std_
+                    x_periods.append(p)     # x軸 = p(分)
+                    sigma1_values.append(sigma1)
+                    sigma2_values.append(sigma2)
+                else:
+                    pass
+            # (b) x_periods, sigma1_values, sigma2_values を用いて線を描画
+            # 5/30/60/240/360 の点を結ぶ折れ線にする
+            if len(x_periods) > 1:
+                self.sigma1_line.setData(x_periods, sigma1_values)
+                self.sigma2_line.setData(x_periods, sigma2_values)
+            else:
+                self.sigma1_line.clear()
+                self.sigma2_line.clear()
+        # 4) Y軸の範囲を調整 (リターン, σライン など含める)
+        y_candidates = list(returns)
+        # sigma1_line / sigma2_line のデータも含めてレンジ計算
+        _, y_s1 = self.sigma1_line.getData()
+        _, y_s2 = self.sigma2_line.getData()
+        if y_s1 is not None:
+            y_candidates.extend(y_s1)
+        if y_s2 is not None:
+            y_candidates.extend(y_s2)
+            
+        if y_candidates:
+            ymin = min(y_candidates)
+            ymax = max(y_candidates)
+            yrange = ymax - ymin
+            self.plot_widget.setYRange(ymin - 0.1*yrange, ymax + 0.1*yrange)
+            
+        # x軸の範囲:
+        if x_vals:
+            self.plot_widget.setXRange(0, max(x_vals) + 1)
+                    
 
 def run_fetcher_loop(fetcher: CMELiveDataFetcher):
     """
@@ -323,5 +426,8 @@ def main():
     # 5) GUIループ開始
     sys.exit(app.exec_())
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
+
+else:
+    __all__ = ['MainWindow']
