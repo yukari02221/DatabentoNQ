@@ -363,13 +363,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_lines_initialized = True
         self.update_sigma_lines()  # 初期描画
         
-    def calculate_initial_volatility(self, prices):
-        """寄付きから一定範囲(例:最初の5分)のHLボラティリティを調べるなど"""
-        if not prices:
+    def calculate_initial_volatility(self, returns_window):
+        """
+        returns_window: たとえば最初の5つのリターン（%）を格納したリスト
+        例: [0.00, 0.07, -0.26, -0.35, -0.54]
+
+        この中の最大値 - 最小値 をボラティリティとする。
+        （差は必ず0以上なのでabsはつけなくてもOKですが、つけても同じ結果になります）
+        """
+        if not returns_window:
             return 0.0
-        high = max(prices)
-        low = min(prices)
-        return ((high - low) / low) * 100
+        vol_range = max(returns_window) - min(returns_window)
+        return abs(vol_range)
     
     def determine_quartile(self, value):
         """value (初期ボラ) に応じて Q1/Q2/Q3/Q4 を返す"""
