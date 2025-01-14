@@ -563,7 +563,7 @@ def run_fetcher_loop(fetcher: CMELiveDataFetcher):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--symbol', default='NQ.c.0', help='Symbol to subscribe')
+    parser.add_argument('--symbol', default='NQH5', help='Symbol to subscribe')
     args = parser.parse_args()
 
     fetcher = CMELiveDataFetcher(debug_mode=False)
