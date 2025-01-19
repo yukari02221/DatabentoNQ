@@ -91,70 +91,68 @@ class CMELiveDataFetcher:
 
     def process_bar(self, record) -> None:
         asyncio.create_task(self._process_bar_async(record))
+        
 
     async def _process_bar_async(self, record) -> None:
-        """
-        受信したレコードを非同期で処理する。
-        ここで base_price の設定タイミングを 9:30 以降に限定する修正を行う。
-        """
-        try:
-            if isinstance(record, SymbolMappingMsg):
-                symbol = record.stype_out_symbol
-                # 既に登録済みのシンボルの場合はログを出力しない
-                if record.instrument_id not in self.instrument_id_map:
-                    self.instrument_id_map[record.instrument_id] = symbol
-                    self.logger.log('INFO', 'process_bar',
-                        f"Symbol Mapping: ID={record.instrument_id}, "
-                        f"Out={symbol}, Time={record.pretty_ts_event}"
-                    )
+            """
+            受信したレコードを非同期で処理する。
+            ここで base_price の設定タイミングを 9:30 以降に限定する修正を行う。
+            """
+            try:
+                if isinstance(record, SymbolMappingMsg):
+                    symbol = record.stype_out_symbol
+                    # 既に登録済みのシンボルの場合はログを出力しない
+                    if record.instrument_id not in self.instrument_id_map:
+                        self.instrument_id_map[record.instrument_id] = symbol
+                        self.logger.log('INFO', 'process_bar',
+                            f"Symbol Mapping: ID={record.instrument_id}, "
+                            f"Out={symbol}, Time={record.pretty_ts_event}"
+                        )
 
-            elif isinstance(record, SystemMsg):
-                self.logger.log('INFO','process_bar', f"System Message: {record.msg}")
+                elif isinstance(record, SystemMsg):
+                    self.logger.log('INFO','process_bar', f"System Message: {record.msg}")
 
-            elif isinstance(record, OHLCVMsg):
-                with self.lock:
-                    mapped_symbol = self.instrument_id_map.get(record.instrument_id, "Unknown")
-                    bar_data = {
-                        'timestamp': pd.Timestamp(record.ts_event),
-                        'symbol': mapped_symbol,
-                        'open':   record.open / 1e9,
-                        'high':   record.high / 1e9,
-                        'low':    record.low / 1e9,
-                        'close':  record.close / 1e9,
-                        'volume': record.volume
-                    }
-                    current_time = (pd.Timestamp(record.ts_event)
-                                    .tz_localize("UTC")
-                                    .tz_convert(self.ny_tz))
-                    
-                    # まだ base_price が設定されていない場合、
-                    # かつ "9:30 以降" のバーであれば base_price をセットする。
-                    if self.price_data[mapped_symbol]['base_price'] is None:
-                        # 9:30 以降（hour == 9 and minute >= 30）か、あるいは hour > 9 であればセット
-                        if (current_time.hour > 9) or (current_time.hour == 9 and current_time.minute >= 30):
-                            self.price_data[mapped_symbol]['base_price'] = bar_data['close']
-                    
-                    # いずれにせよ記録は続ける
-                    self.price_data[mapped_symbol]['times'].append(current_time)
-                    self.price_data[mapped_symbol]['prices'].append(bar_data['close'])
-                    
-                    base = self.price_data[mapped_symbol]['base_price']
-                    if base is not None:
-                        ret = (bar_data['close'] / base - 1) * 100
-                    else:
-                        # まだ9:30より前なので、リターンは0%としておく
-                        ret = 0.0
-                    
-                    self.price_data[mapped_symbol]['returns'].append(ret)
+                elif isinstance(record, OHLCVMsg):
+                    with self.lock:
+                        mapped_symbol = self.instrument_id_map.get(record.instrument_id, "Unknown")
+                        bar_data = {
+                            'timestamp': pd.Timestamp(record.ts_event),
+                            'symbol': mapped_symbol,
+                            'open':   record.open / 1e9,
+                            'high':   record.high / 1e9,
+                            'low':    record.low / 1e9,
+                            'close':  record.close / 1e9,
+                            'volume': record.volume
+                        }
+                        current_time = (pd.Timestamp(record.ts_event)
+                                        .tz_localize("UTC")
+                                        .tz_convert(self.ny_tz))
 
-                self.logger.log('INFO','process_bar',
-                    f"OHLCV Data: {bar_data}, Return={self.price_data[mapped_symbol]['returns'][-1]:.2f}%")
+                        is_after_930 = (current_time.hour > 9) or (current_time.hour == 9 and current_time.minute >= 30)
+                        
+                        if is_after_930:
+                            # 9:30以降の場合のみデータを記録
+                            if self.price_data[mapped_symbol]['base_price'] is None:
+                                self.price_data[mapped_symbol]['base_price'] = bar_data['close']
+                                
+                            self.price_data[mapped_symbol]['times'].append(current_time)
+                            self.price_data[mapped_symbol]['prices'].append(bar_data['close'])
+                            
+                            base = self.price_data[mapped_symbol]['base_price']
+                            ret = (bar_data['close'] / base - 1) * 100
+                            self.price_data[mapped_symbol]['returns'].append(ret)
 
-            else:
-                self.logger.log('INFO','process_bar', f"New Record Type: {type(record)}")
+                            self.logger.log('INFO','process_bar',
+                                f"OHLCV Data: {bar_data}, Return={ret:.2f}%")
+                        else:
+                            self.logger.log('INFO','process_bar',
+                                f"9:30以前のデータはスキップ: {bar_data}")
 
-        except Exception as e:
-            self.logger.log('ERROR','process_bar', f"Error: {str(e)}")
+                else:
+                    self.logger.log('INFO','process_bar', f"New Record Type: {type(record)}")
+
+            except Exception as e:
+                self.logger.log('ERROR','process_bar', f"Error: {str(e)}")
 
     async def run_session(self, market_close: datetime):
         """
@@ -588,6 +586,7 @@ def main():
     
     # 5) GUIループ開始
     sys.exit(app.exec_())
+
 
 if __name__=="__main__":
     main()

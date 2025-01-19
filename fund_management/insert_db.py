@@ -13,7 +13,6 @@ class TradeDatabase:
         """データベースとテーブルの初期化（既存のテーブル構造を変更しない）"""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                # 既存テーブルがなければ作成（既存の構造を維持）
                 conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id TEXT,
@@ -157,79 +156,64 @@ class TradeDatabase:
         except Exception as e:
             print(f"復元中にエラーが発生しました: {str(e)}")
 
-def parse_datetime(date_string):
-    return datetime.strptime(date_string.strip(), "%B %d %Y @ %I:%M:%S %p")
-
-def parse_price(price_str):
-    return float(price_str.replace(',', '').replace('$', '').strip())
-
-def read_trade_data(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        lines = file.readlines()
+def parse_datetime(date_string: str) -> datetime:
+    """日時文字列をdatetimeオブジェクトに変換する"""
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",  # マイクロ秒あり
+        "%Y-%m-%d %H:%M:%S"      # マイクロ秒なし
+    ]
     
-    trades = []
-    for i in range(0, len(lines), 12):
-        if i + 11 < len(lines):
-            trade = {
-                'id': lines[i].strip(),
-                'symbol': lines[i + 1].strip(),
-                'size': int(lines[i + 2].strip()),
-                'entry_time': parse_datetime(lines[i + 3]),
-                'exit_time': parse_datetime(lines[i + 4]),
-                'entry_price': parse_price(lines[i + 5]),
-                'exit_price': parse_price(lines[i + 6]),
-                'pnl': parse_price(lines[i + 7]),
-                'commission': parse_price(lines[i + 8]),
-                'fees': parse_price(lines[i + 9]),
-                'direction': lines[i + 10].strip()
-            }
-            trades.append(trade)
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
     
-    return pd.DataFrame(trades)
+    raise ValueError(f"サポートされている日時フォーマットではありません: {date_string}")
 
-def read_trade_data(file_path):
+def read_trade_data(file_path: str) -> pd.DataFrame:
     """
     トレードデータを直接作成して返す
     """
     trades = [
         {
-            'id': '515447151',
+            'id': '540719608',
             'symbol': '/MNQ',
             'size': 1,
-            'entry_time': parse_datetime('January 8 2025 @ 11:55:20 pm'),
-            'exit_time': parse_datetime('January 8 2025 @ 11:55:32 pm'),
-            'entry_price': 21313.25,
-            'exit_price': 21331.00,
-            'pnl': -35.50,
+            'entry_time': parse_datetime('2025-01-17 23:37:30'),
+            'exit_time': parse_datetime('2025-01-17 23:46:07'),
+            'entry_price': 21553.00,
+            'exit_price': 21553.00,
+            'pnl': 0.00,
             'commission': 0,
             'fees': -0.74,
             'direction': 'Short'
         },
         {
-            'id': '520018203',
+            'id': '541019059',
             'symbol': '/MNQ',
             'size': 1,
-            'entry_time': parse_datetime('January 10 2025 @ 10:35:18 pm'),
-            'exit_time': parse_datetime('January 10 2025 @ 10:43:23 pm'),
-            'entry_price': 21076.25,
-            'exit_price': 21133.75,
-            'pnl': 115.00,
+            'entry_time': parse_datetime('2025-01-18 00:06:36'),
+            'exit_time': parse_datetime('2025-01-18 00:07:35'),
+            'entry_price': 21565.75,
+            'exit_price': 21578.25,
+            'pnl': -25.00,
             'commission': 0,
             'fees': -0.74,
-            'direction': 'Long'
+            'direction': 'Short'
         },
         {
-            'id': '521693568',
+            'id': '541265496',
             'symbol': '/MNQ',
             'size': 1,
-            'entry_time': parse_datetime('January 11 2025 @ 1:50:15 am'),
-            'exit_time': parse_datetime('January 11 2025 @ 1:55:50 am'),
-            'entry_price': 20953.25,
-            'exit_price': 20931.75,
-            'pnl': -43.00,
+            'entry_time': parse_datetime('2025-01-18 00:22:30'),
+            'exit_time': parse_datetime('2025-01-18 00:29:04'),
+            'entry_price': 21514.50,
+            'exit_price': 21525.75,
+            'pnl': -22.50,
             'commission': 0,
             'fees': -0.74,
-            'direction': 'Long'
+            'direction': 'Short'
         }
     ]
     
