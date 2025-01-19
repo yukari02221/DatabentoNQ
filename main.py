@@ -37,6 +37,9 @@ class CMELiveDataFetcher:
             'base_price': None,
             'returns': [],
             'market_open_time': None,
+            # 60区間分の価格データを保持するキュー
+            'price_queue': [],
+            'queue_initialized': False  # キューの初期化フラグ
         })
 
         self.ny_tz = pytz.timezone('America/New_York')
@@ -46,6 +49,8 @@ class CMELiveDataFetcher:
             self.logger.log('INFO', 'init', "Running in debug mode")     
         # スレッドセーフにするためのロック
         self.lock = threading.Lock()
+        # キューの最大サイズ
+        self.QUEUE_MAX_SIZE = 60
         
     async def __aenter__(self):
         return self
@@ -62,7 +67,9 @@ class CMELiveDataFetcher:
                     'prices': [],
                     'base_price': None,
                     'returns': [],
-                    'market_open_time': None
+                    'market_open_time': None,
+                    'price_queue': [],
+                    'queue_initialized': False
                 })
         self.logger.log('INFO', 'reset_price_data', "Price data has been reset for new session")
 
@@ -101,7 +108,6 @@ class CMELiveDataFetcher:
             try:
                 if isinstance(record, SymbolMappingMsg):
                     symbol = record.stype_out_symbol
-                    # 既に登録済みのシンボルの場合はログを出力しない
                     if record.instrument_id not in self.instrument_id_map:
                         self.instrument_id_map[record.instrument_id] = symbol
                         self.logger.log('INFO', 'process_bar',
@@ -131,6 +137,19 @@ class CMELiveDataFetcher:
                         is_after_930 = (current_time.hour > 9) or (current_time.hour == 9 and current_time.minute >= 30)
                         
                         if is_after_930:
+                            # 価格キューの更新
+                            if not self.price_data[mapped_symbol]['queue_initialized']:
+                                # 最初の60区間分のデータを収集
+                                self.price_data[mapped_symbol]['price_queue'].append(bar_data['close'])
+                                if len(self.price_data[mapped_symbol]['price_queue']) >= self.QUEUE_MAX_SIZE:
+                                    self.price_data[mapped_symbol]['queue_initialized'] = True
+                                    self.logger.log('INFO', 'process_bar',
+                                        f"Price queue initialized for {mapped_symbol} with {self.QUEUE_MAX_SIZE} periods")
+                            else:
+                                # キューが初期化済みの場合、FIFO方式で更新
+                                self.price_data[mapped_symbol]['price_queue'].pop(0)  # 最も古いデータを削除
+                                self.price_data[mapped_symbol]['price_queue'].append(bar_data['close'])  # 新しいデータを追加
+
                             # 9:30以降の場合のみデータを記録
                             if self.price_data[mapped_symbol]['base_price'] is None:
                                 self.price_data[mapped_symbol]['base_price'] = bar_data['close']
@@ -143,7 +162,7 @@ class CMELiveDataFetcher:
                             self.price_data[mapped_symbol]['returns'].append(ret)
 
                             self.logger.log('INFO','process_bar',
-                                f"OHLCV Data: {bar_data}, Return={ret:.2f}%")
+                                f"OHLCV Data: {bar_data}, Return={ret:.2f}%, Queue size={len(self.price_data[mapped_symbol]['price_queue'])}")
                         else:
                             self.logger.log('INFO','process_bar',
                                 f"9:30以前のデータはスキップ: {bar_data}")
@@ -153,6 +172,13 @@ class CMELiveDataFetcher:
 
             except Exception as e:
                 self.logger.log('ERROR','process_bar', f"Error: {str(e)}")
+
+    def get_price_queue_copy(self, symbol: str):
+        """
+        スレッド安全に price_queue のコピーを取得するためのメソッド
+        """
+        with self.lock:
+            return list(self.price_data[symbol]['price_queue'])
 
     async def run_session(self, market_close: datetime):
         """
