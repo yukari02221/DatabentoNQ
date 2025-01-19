@@ -18,6 +18,8 @@ class HistoricalDataFetcher:
             'base_price': None,
             'returns': [],
             'market_open_time': None,
+            'price_queue': [],  # 価格キュー追加
+            'queue_initialized': False  # キュー初期化フラグ
         })
         self.lock = threading.Lock()
         self.ny_tz = pytz.timezone('America/New_York')
@@ -25,6 +27,7 @@ class HistoricalDataFetcher:
         self.simulation_data = None
         self.current_index = 0
         self.timer = None
+        self.QUEUE_MAX_SIZE = 60  # キューの最大サイズ
         
     def load_historical_data(self, date_str: str):
         try:
@@ -76,12 +79,22 @@ class HistoricalDataFetcher:
         with self.lock:
             symbol = 'MNQ'
             current_row = self.simulation_data.iloc[self.current_index]
+            current_price = current_row['close']
+            
+            # 価格キューの更新
+            if not self.price_data[symbol]['queue_initialized']:
+                self.price_data[symbol]['price_queue'].append(current_price)
+                if len(self.price_data[symbol]['price_queue']) >= self.QUEUE_MAX_SIZE:
+                    self.price_data[symbol]['queue_initialized'] = True
+            else:
+                self.price_data[symbol]['price_queue'].pop(0)  # 最も古いデータを削除
+                self.price_data[symbol]['price_queue'].append(current_price)  # 新しいデータを追加
             
             self.price_data[symbol]['times'].append(current_row['timestamp'])
-            self.price_data[symbol]['prices'].append(current_row['close'])
+            self.price_data[symbol]['prices'].append(current_price)
             
             base_price = self.price_data[symbol]['base_price']
-            ret = ((current_row['close'] / base_price) - 1) * 100
+            ret = ((current_price / base_price) - 1) * 100
             self.price_data[symbol]['returns'].append(ret)
             
             self.current_index += 1
@@ -97,10 +110,19 @@ class HistoricalDataFetcher:
             r_list = list(self.price_data[symbol]['returns'])
         return t_list, r_list
 
+    def get_price_queue_copy(self, symbol: str):
+        """スレッドセーフに price_queue のコピーを取得"""
+        with self.lock:
+            if symbol not in self.price_data:
+                return []
+            return list(self.price_data[symbol]['price_queue'])
+
 class SimulationWindow(MainWindow):
     def __init__(self, fetcher: HistoricalDataFetcher, symbol: str):
+        # 親クラスの初期化を先に行う
         super().__init__(fetcher, symbol)
-        # シミュレーション用タイマーをここで設定
+        
+        # シミュレーション用タイマーの設定
         self.simulation_timer = QtCore.QTimer()
         self.simulation_timer.timeout.connect(fetcher.simulate_next_minute)
         self.simulation_timer.start(1000)  # 1秒ごとに更新
@@ -117,7 +139,6 @@ def main():
     fetcher = HistoricalDataFetcher(args.db_path)
     fetcher.load_historical_data(args.date)
     
-    # MainWindowの代わりにSimulationWindowを使用
     window = SimulationWindow(fetcher, 'MNQ')
     window.show()
     

@@ -249,7 +249,19 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.fetcher = fetcher
         self.symbol = symbol
+
+        # シンボルごとの設定
+        self.symbol_config = {
+            'MNQ': {
+                'price_tick': 0.25,  # MNQの最小価格変動幅（0.25ポイント）
+                'tick_value': 0.50,  # 1ティックあたりの価値（$0.50）
+            }
+        }
+        # シンボルの設定を取得
+        self.price_tick = self.symbol_config[symbol]['price_tick']
+        self.tick_value = self.symbol_config[symbol]['tick_value']
         
+
         #四分位数の境界値
         self.quartile_boundaries = {
             'Q1': 0.195,
@@ -272,10 +284,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.central_widget = QtWidgets.QWidget()
         self.setCentralWidget(self.central_widget)
         layout = QtWidgets.QVBoxLayout(self.central_widget)
-
-        # pyqtgraph の PlotWidget を用意
         self.plot_widget = pg.PlotWidget()
+        
+        # 価格滞留表示用のラベルを追加
+        self.stagnation_label = QtWidgets.QLabel()
+        self.stagnation_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 180);
+                color: white;
+                padding: 10px;
+                border-radius: 5px;
+                font-size: 14px;
+            }
+        """)
+        self.stagnation_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        # ラベルをレイアウトに追加
+        layout.addWidget(self.stagnation_label)
         layout.addWidget(self.plot_widget)
+        
+        # 価格滞留の計算結果を保持
+        self.most_frequent_price = None
+        self.most_frequent_count = 0
+
+        # # pyqtgraph の PlotWidget を用意
+        # self.plot_widget = pg.PlotWidget()
+        # layout.addWidget(self.plot_widget)
         
         # plot itemの初期化
         self.return_curve = self.plot_widget.plot([],[],
@@ -333,6 +367,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(1000)  # 1秒ごとに更新
         self.timer.timeout.connect(self.update_plot)
         self.timer.start()
+
+    def calculate_price_stagnation(self, price_queue):
+        """
+        価格の滞留を計算する
+        """
+        if not price_queue:
+            return None, 0
+            
+        # 価格をティック単位に変換
+        price_ticks = [round(price / self.price_tick) for price in price_queue]
+        
+        # 価格帯ごとのカウント
+        from collections import defaultdict
+        price_counts = defaultdict(int)
+        
+        # 各価格のカウント
+        for tick in price_ticks:
+            price_counts[tick] += 1
+        
+        if not price_counts:
+            return None, 0
+            
+        # 最頻価格とそのカウントを取得
+        most_freq_tick = max(price_counts.items(), key=lambda x: x[1])
+        most_freq_price = most_freq_tick[0] * self.price_tick
+        most_freq_count = most_freq_tick[1]
+        
+        return most_freq_price, most_freq_count
+
 
     def initialize_sigma_lines(self):
         """初期のσライン値を計算して保存"""
@@ -415,6 +478,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_plot(self):
         # データ取得
         times, returns = self.fetcher.get_data_copy(self.symbol)
+
+        # 価格キューを取得
+        price_queue = self.fetcher.get_price_queue_copy(self.symbol)
+        
+        # 価格滞留の計算
+        if price_queue:
+            most_freq_price, most_freq_count = self.calculate_price_stagnation(price_queue)
+            if most_freq_price is not None:
+                self.most_frequent_price = most_freq_price
+                self.most_frequent_count = most_freq_count
+                
+                # ラベルの更新
+                stagnation_text = (
+                    f"Most Frequent Price: {self.most_frequent_price:.2f}\n"
+                    f"Stagnation Count: {self.most_frequent_count}"
+                )
+                self.stagnation_label.setText(stagnation_text)
+                
         if len(times) == 0:
             return
 
