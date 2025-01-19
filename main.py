@@ -181,13 +181,16 @@ class CMELiveDataFetcher:
             return list(self.price_data[symbol]['price_queue'])
 
     async def run_session(self, market_close: datetime):
-        """
-        1度のセッションで、9:00〜16:00までデータを購読して待機する処理を行う。
-        """
         try:
-            # セッション開始前にデータ初期化
             await self.reset_price_data()
-            await self.databento_client.setup_subscription()
+
+            # 初回は過去1時間分のデータも含める購読にしたい
+            # 例: self.databento_client.first_time_subscribed を見て判断
+            use_preopen = not self.databento_client.first_time_subscribed
+
+            # ここで引数を渡す
+            await self.databento_client.setup_subscription(symbols="NQ.c.0", use_preopen_data=use_preopen)
+
             self.databento_client.start(self.process_bar)
             self.logger.log('INFO','run_session', "Streaming started")
 
@@ -252,14 +255,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # シンボルごとの設定
         self.symbol_config = {
+            'NQ': {
+                'price_tick': 0.25,
+                'tick_value': 5.00,  # 通常のナスダック先物
+            },
             'MNQ': {
-                'price_tick': 0.25,  # MNQの最小価格変動幅（0.25ポイント）
-                'tick_value': 0.50,  # 1ティックあたりの価値（$0.50）
+                'price_tick': 0.25,
+                'tick_value': 0.50,  # Micro NQ
             }
         }
+        
+        # 例: "NQH5" や "NQZ4" などの先頭2~3文字から "NQ" / "MNQ" を取り出す
+        self.base_symbol = self.extract_root_symbol(symbol)
+
+        # ここで辞書を参照
+        config = self.symbol_config.get(self.base_symbol)
+        if config is None:
+            raise KeyError(f"Unsupported symbol root: {self.base_symbol}")
+
         # シンボルの設定を取得
-        self.price_tick = self.symbol_config[symbol]['price_tick']
-        self.tick_value = self.symbol_config[symbol]['tick_value']
+        self.price_tick = config['price_tick']
+        self.tick_value = config['tick_value']
         
 
         #四分位数の境界値
@@ -367,6 +383,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(1000)  # 1秒ごとに更新
         self.timer.timeout.connect(self.update_plot)
         self.timer.start()
+
+    def extract_root_symbol(self, symbol: str) -> str:
+        """
+        例:
+          NQH5  -> NQ
+          MNQH5 -> MNQ
+          NQM5  -> NQ
+          MNQU5 -> MNQ
+          ...
+        """
+        # MNQ で始まるなら 'MNQ'、そうでなければ先頭2文字を 'NQ' とみなす例
+        # 正規表現でもOKですし、startswithでもOK
+        if symbol.startswith("MNQ"):
+            return "MNQ"
+        elif symbol.startswith("NQ"):
+            return "NQ"
+        else:
+            # 未対応の先物銘柄ならエラーにするか、適当にデフォルトにするか
+            raise KeyError(f"Cannot parse symbol: {symbol}")
 
     def calculate_price_stagnation(self, price_queue):
         """
