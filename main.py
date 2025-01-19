@@ -370,31 +370,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def calculate_price_stagnation(self, price_queue):
         """
-        価格の滞留を計算する
+        価格の滞留を計算する（高値・安値の範囲を考慮）
+        
+        Args:
+            price_queue: 価格データのリスト。各要素は {'high': float, 'low': float} の形式
+            
+        Returns:
+            tuple: (最頻価格, 出現回数)。エラー時は (None, 0) を返す
         """
-        if not price_queue:
-            return None, 0
+        try:
+            if not price_queue:
+                return None, 0
+                
+            # 価格帯ごとのカウント
+            from collections import defaultdict
+            price_counts = defaultdict(int)
             
-        # 価格をティック単位に変換
-        price_ticks = [round(price / self.price_tick) for price in price_queue]
-        
-        # 価格帯ごとのカウント
-        from collections import defaultdict
-        price_counts = defaultdict(int)
-        
-        # 各価格のカウント
-        for tick in price_ticks:
-            price_counts[tick] += 1
-        
-        if not price_counts:
-            return None, 0
+            # 各価格範囲をティック単位に変換してカウント
+            for price_data in price_queue:
+                # 安値と高値をティックに変換
+                low_tick = round(price_data['low'] / self.price_tick)
+                high_tick = round(price_data['high'] / self.price_tick)
+                
+                # 範囲内の全価格をカウント
+                for tick in range(low_tick, high_tick + 1):
+                    price_counts[tick] += 1
             
-        # 最頻価格とそのカウントを取得
-        most_freq_tick = max(price_counts.items(), key=lambda x: x[1])
-        most_freq_price = most_freq_tick[0] * self.price_tick
-        most_freq_count = most_freq_tick[1]
-        
-        return most_freq_price, most_freq_count
+            if not price_counts:
+                return None, 0
+                
+            # 最頻価格とそのカウントを取得
+            most_freq_tick = max(price_counts.items(), key=lambda x: x[1])
+            most_freq_price = most_freq_tick[0] * self.price_tick
+            most_freq_count = most_freq_tick[1]
+            
+            return most_freq_price, most_freq_count
+            
+        except Exception as e:
+            print(f"Error calculating price stagnation: {str(e)}")
+            return None, 0
 
 
     def initialize_sigma_lines(self):

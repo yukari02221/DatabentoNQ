@@ -71,36 +71,42 @@ class HistoricalDataFetcher:
             conn.close()
 
     def simulate_next_minute(self):
-        if self.simulation_data is None or self.current_index >= len(self.simulation_data):
-            if self.timer:
-                self.timer.stop()
-            return
-        
-        with self.lock:
-            symbol = 'MNQ'
-            current_row = self.simulation_data.iloc[self.current_index]
-            current_price = current_row['close']
+            if self.simulation_data is None or self.current_index >= len(self.simulation_data):
+                if self.timer:
+                    self.timer.stop()
+                return
             
-            # 価格キューの更新
-            if not self.price_data[symbol]['queue_initialized']:
-                self.price_data[symbol]['price_queue'].append(current_price)
-                if len(self.price_data[symbol]['price_queue']) >= self.QUEUE_MAX_SIZE:
-                    self.price_data[symbol]['queue_initialized'] = True
-            else:
-                self.price_data[symbol]['price_queue'].pop(0)  # 最も古いデータを削除
-                self.price_data[symbol]['price_queue'].append(current_price)  # 新しいデータを追加
-            
-            self.price_data[symbol]['times'].append(current_row['timestamp'])
-            self.price_data[symbol]['prices'].append(current_price)
-            
-            base_price = self.price_data[symbol]['base_price']
-            ret = ((current_price / base_price) - 1) * 100
-            self.price_data[symbol]['returns'].append(ret)
-            
-            self.current_index += 1
-            
-            print(f"Added data point {self.current_index}/{len(self.simulation_data)}: "
-                  f"Time={current_row['timestamp']}, Return={ret:.2f}%")
+            with self.lock:
+                symbol = 'MNQ'
+                current_row = self.simulation_data.iloc[self.current_index]
+                
+                # 価格データを辞書形式で保存
+                price_data = {
+                    'low': current_row['low'],
+                    'high': current_row['high'],
+                    'close': current_row['close']
+                }
+                
+                # 価格キューの更新
+                if not self.price_data[symbol]['queue_initialized']:
+                    self.price_data[symbol]['price_queue'].append(price_data)
+                    if len(self.price_data[symbol]['price_queue']) >= self.QUEUE_MAX_SIZE:
+                        self.price_data[symbol]['queue_initialized'] = True
+                else:
+                    self.price_data[symbol]['price_queue'].pop(0)  # 最も古いデータを削除
+                    self.price_data[symbol]['price_queue'].append(price_data)  # 新しいデータを追加
+                
+                self.price_data[symbol]['times'].append(current_row['timestamp'])
+                self.price_data[symbol]['prices'].append(price_data['close'])
+                
+                base_price = self.price_data[symbol]['base_price']
+                ret = ((price_data['close'] / base_price) - 1) * 100
+                self.price_data[symbol]['returns'].append(ret)
+                
+                self.current_index += 1
+                
+                print(f"Added data point {self.current_index}/{len(self.simulation_data)}: "
+                    f"Time={current_row['timestamp']}, Return={ret:.2f}%")
 
     def get_data_copy(self, symbol: str):
         with self.lock:
