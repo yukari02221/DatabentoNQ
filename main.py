@@ -408,8 +408,9 @@ class MainWindow(QtWidgets.QMainWindow):
         価格の滞留を計算する（高値・安値の範囲を考慮）
         
         Args:
-            price_queue: 価格データのリスト。各要素は {'high': float, 'low': float} の形式
-            
+            price_queue: 価格データのリスト。
+            各要素は{'high': float, 'low': float}の形式
+                
         Returns:
             tuple: (最頻価格, 出現回数)。エラー時は (None, 0) を返す
         """
@@ -421,7 +422,7 @@ class MainWindow(QtWidgets.QMainWindow):
             from collections import defaultdict
             price_counts = defaultdict(int)
             
-            # 各価格範囲をティック単位に変換してカウント
+            # 各価格範囲をティック単位でカウント
             for price_data in price_queue:
                 # 安値と高値をティックに変換
                 low_tick = round(price_data['low'] / self.price_tick)
@@ -440,7 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             most_freq_count = most_freq_tick[1]
             
             return most_freq_price, most_freq_count
-            
+                
         except Exception as e:
             print(f"Error calculating price stagnation: {str(e)}")
             return None, 0
